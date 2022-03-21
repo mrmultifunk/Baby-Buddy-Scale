@@ -1,0 +1,494 @@
+esphome:
+  name: mme-scale
+
+esp8266:
+  board: d1_mini
+
+# Enable logging
+logger:
+  level: INFO
+
+# Enable Home Assistant API
+api:
+
+ota:
+  password: "your password"
+
+wifi:
+  ssid: "your ssid"
+  password: "your password"
+  power_save_mode: none
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Mme-Scale Fallback Hotspot"
+    password: "yor password"
+
+captive_portal:
+
+################################################################################
+#                                   Notes                                      #
+################################################################################
+
+## Bottle_tare = 73,4g
+
+################################################################################
+#                                  Globals                                     #
+################################################################################
+globals:
+  - id: initial_zero
+    type: float
+    restore_value: yes
+    # NOTE: make sure to align this value to the one used in "calibrate_linear" below!
+    initial_value: '160078'
+    
+  - id: auto_tare_enabled
+    type: bool
+    restore_value: yes
+    initial_value: 'true'
+
+  - id: auto_tare_difference
+    type: float
+    restore_value: yes
+    initial_value: '0'
+    
+  - id: manual_tare_flag
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+    
+  - id: feeding_ongoing_flag
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+    
+time:
+  - platform: homeassistant
+    id: esptime
+
+################################################################################
+#                                Configuration                                 #
+################################################################################
+switch:
+  ## Switch to enable/disable the auto tare feature
+  - platform: template
+    id: smart_scale_continuous_tare_enabled
+    name: "MME Scale Continuous Tare Enabled"
+    icon: mdi:refresh-auto
+    lambda: |-
+      return id(auto_tare_enabled);
+    turn_on_action:
+      - lambda: |-
+          id(auto_tare_enabled) = true;
+    turn_off_action:
+      - lambda: |-
+          id(auto_tare_enabled) = false;
+  
+  ## Switch used to initiate a manual tare
+  - platform: template
+    id: smart_scale_manual_tare_action_switch
+    name: "MME Scale Manual Tare Action"
+    icon: mdi:refresh
+    lambda: |-
+      return id(manual_tare_flag);
+    turn_on_action:
+      - lambda: |-
+          id(auto_tare_difference) = id(initial_zero) - id(smart_scale_hx711_value_raw).state;
+      - switch.turn_off: smart_scale_manual_tare_action_switch
+    turn_off_action:
+      - lambda: |-
+          id(manual_tare_flag) = false;
+          
+  ## Switch used to turn on/off display
+  - platform: template
+    id: lcd_on_off
+    name: "MME display"
+    icon: mdi:television
+    turn_on_action:
+      - lambda: id(lcd).turn_on();
+    turn_off_action:
+      - lambda: id(lcd).turn_off();
+
+sensor:
+  ## Intitial zero
+  - platform: template
+    id: smart_scale_initial_zero
+    name: "Smart Scale Initial Zero"
+    icon: mdi:numeric-0-circle
+    lambda: |-
+      return id(initial_zero);
+    update_interval: 1s
+  
+  ## Tare difference
+  - platform: template
+    id: smart_scale_auto_tare_difference
+    name: "Smart Scale Auto Tare Difference"
+    unit_of_measurement: trin
+    icon: mdi:chart-areaspline
+    lambda: |-
+      return id(auto_tare_difference);
+    update_interval: 1s
+  
+  ## HX711 raw value
+  - platform: hx711
+    id: smart_scale_hx711_value_raw
+    internal: True
+    dout_pin: D6
+    clk_pin: D7
+    gain: 128
+    unit_of_measurement: g
+    accuracy_decimals: 3
+    update_interval: 0.5s
+    filters:
+      - sliding_window_moving_average:
+          window_size: 3
+          send_every: 1
+    on_value:
+      then:
+        - sensor.template.publish:
+            id: smart_scale_hx711_value
+            state: !lambda 'return id(smart_scale_hx711_value_raw).state;'
+        - if:
+            condition:
+              and:
+                - lambda: 'return id(auto_tare_enabled);'
+                # current smart scale value is below approx. 10KG (raw value -275743) aka nobody is standing on the scale
+                - lambda: 'return id(smart_scale_hx711_value).state < 10.0;'
+            then:
+              - if:
+                  condition:
+                    # current raw scale value is below expected zero value
+                    - lambda: 'return id(smart_scale_hx711_value_raw).state < (id(initial_zero) - id(auto_tare_difference));'
+                  then:
+                    # INcrease Auto-Tare offset to slowly align real zero value with expected zero value
+                    - lambda: |-
+                        id(auto_tare_difference) += 10;
+                  else:
+                    # DEcrease Auto-Tare offset to slowly align real zero value with expected zero value
+                    - lambda: |-
+                        id(auto_tare_difference) -= 10;
+                        
+  ## Mapped value to grams, exposed to HA
+  - platform: template
+    id: smart_scale_hx711_value
+    name: "Smart Scale HX711 Value"
+    internal: False
+    icon: mdi:scale
+    filters:
+      # apply auto_tare difference
+      - lambda: 'return x + id(auto_tare_difference);'
+      # apply rough calibration
+      - calibrate_linear:
+          # retrieve these values by evaluating the raw values with loads of known mass.
+          # note that a bigger difference between measurements usually results in higher resolution,
+          # so measure 0 Kg and the highest known mass you have (like f.ex. your own weight, measured by a normal scale with good accuracy)
+          - 160078 -> 0.0
+          - -1219311 -> 351.0
+          #- 141829 -> 28.7
+      # map values below 0.1 to 0 (to decrease value changes due to random fluctuation)
+      - lambda: |-
+          if (x <= 0.1) {
+            return 0.0;
+          } else {
+            return x;
+          }
+    on_value:
+      then:
+        - sensor.template.publish:
+            id: mme_ml
+            state: !lambda 'return id(smart_scale_hx711_value).state;'
+        - lambda: id(lcd).turn_on();
+          
+    unit_of_measurement: g
+    accuracy_decimals: 2
+    update_interval: 0.5s
+  
+  ## Formula amount in mL  
+  - platform: template
+    id: mme_ml
+    name: "MME mængde"
+    internal: False
+    icon: mdi:baby-bottle
+    filters:
+      # apply auto_tare difference
+      - lambda: |-
+          if (x <= 76.0) {
+            return 0.0;
+          } else {
+            return (x - 73.4)/0.995;
+          }
+    unit_of_measurement: mL
+    accuracy_decimals: 1
+    update_interval: 0.5s
+    
+  ## Latest full bottle registred
+  - platform: template
+    name: "Marie MME seneste fulde"
+    id: latest_full
+    unit_of_measurement: mL
+    icon: mdi:baby-bottle
+    
+  ## Latest empty bottle registred
+  - platform: template
+    name: "Marie MME seneste tomme"
+    id: latest_empty
+    unit_of_measurement: mL
+    icon: mdi:baby-bottle-outline
+    
+  ## Latest feeded amout mL
+  - platform: template
+    name: "Marie MME seneste mængde"
+    id: latest_amount
+    unit_of_measurement: mL
+    icon: mdi:baby-bottle-outline
+  
+  ## HA sensor - Last feeding from Baby Buddy integration
+  - platform: homeassistant
+    name: "MME mængde"
+    entity_id: sensor.marie_engedal_last_feeding
+    id: mme_amount_ha
+    internal: true
+  
+  ## Wifi signal sensor
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifisignal
+    update_interval: 15s
+
+text_sensor:
+  ## HA sensor - latest feeding time in "HH:MM"
+  - platform: homeassistant
+    id: seneste
+    entity_id: sensor.mme_marie_faerdig
+    internal: true
+    
+  ## HA sensor - timestamp string. Currently not used.  
+  - platform: homeassistant
+    id: timer
+    entity_id: sensor.marie_engedal_last_timer
+    internal: true
+    
+binary_sensor:
+  ## Green button - Full bottle
+  - platform: gpio
+    name: "MME fuld flaske"
+    id: green
+    icon: mdi:circle
+    pin:
+      number: D5
+      inverted: true
+      mode: INPUT_PULLUP
+    on_press:
+      then:
+        - if:
+            condition:
+              and:
+                - binary_sensor.is_on: timer_on
+                - lambda: 'return id(mme_ml).state > 0.0;'
+            then:
+              - while:
+                  condition:
+                    binary_sensor.is_on: timer_on
+                  then:
+                    - display.page.show: feed_timer
+        - if:
+            condition:
+              and:
+                - binary_sensor.is_off: timer_on
+                - lambda: 'return id(mme_ml).state > 0.0;'
+            then:
+              - sensor.template.publish:
+                  id: latest_full
+                  state: !lambda 'return id(mme_ml).state;'
+              - lambda: |-
+                  id(feeding_ongoing_flag) = true;
+              - display.page.show: full
+              - delay: 2s
+              - display.page.show: home
+            else:
+              - logger.log: "Full bottle press registred on empty scale"
+
+  ## Red button - Empty bottle
+  - platform: gpio
+    name: "MME tom flaske"
+    id: red
+    icon: mdi:circle-outline
+    pin:
+      number: RX
+      inverted: true
+      mode: INPUT_PULLUP
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(feeding_ongoing_flag);'
+            then:
+              - sensor.template.publish:
+                  id: latest_empty
+                  state: !lambda 'return id(mme_ml).state;'
+              - sensor.template.publish:
+                  id: latest_amount
+                  state: !lambda 'return id(latest_full).state - id(latest_empty).state;'
+              - lambda: |-
+                  id(feeding_ongoing_flag) = false;
+              - display.page.show: empty
+              - delay: 5s
+              - display.page.show: home
+              - delay: 120s
+              - lambda: id(lcd).turn_off();
+  
+  ## WiFi connected
+  - platform: status
+    name: "MME vægt status"
+    id: connected
+  
+  ## HA binary - Feeding timer active - from template
+  - platform: homeassistant
+    entity_id: binary_sensor.baby_buddy_marie_flasketimer
+    internal: true
+    id: timer_on
+    
+  ## HA binary - Sleeping timer active - from template
+  - platform: homeassistant
+    entity_id: binary_sensor.baby_buddy_marie_sleeptimer
+    internal: true
+    id: sleep_timer_on
+
+################################################################################
+#                                 Display                                      #
+################################################################################
+i2c:
+  sda: D2
+  scl: D1
+  scan: true
+  
+font:
+  - file: 'Aller_BdIt.ttf'
+    id: font1
+    size: 20
+    
+  - file: 'Roboto-Bold.ttf'
+    id: roboto_b_s
+    size: 13
+    
+  - file: 'Roboto-Bold.ttf'
+    id: roboto_b_ss
+    size: 12
+    
+  - file: 'Roboto-Bold.ttf'
+    id: roboto_b
+    size: 20
+    
+  - file: 'Aller_BdIt.ttf'
+    id: font1_s
+    size: 13
+
+  - file: 'OpenSans-Semibold.ttf'
+    id: font2
+    size: 20
+    
+  - file: 'materialdesignicons-webfont.ttf'
+    id: icon_font_10
+    size: 12
+    glyphs: [
+      "󰖩", # wifi-on
+      "󰖪", # wifi-off
+      "󰔟", # hourglass
+      "󰼹", # baby bottle
+      "󰒲" # sleep
+      ]
+      
+  - file: 'materialdesignicons-webfont.ttf'
+    id: icon_font_20
+    size: 20
+    glyphs: [
+      "󰖩", # wifi-on
+      "󰖪", # wifi-off
+      "󰔟", # hourglass
+      "󰼹", # baby bottle
+      "󰒲" # sleep
+      ]
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    id: lcd
+    rotation: 180°
+    address: 0x3C
+    contrast: 100%
+    pages:
+      - id: home
+        lambda: |-
+        
+          // Wifi connected
+          it.print(0, 0, id(icon_font_10), TextAlign::TOP_LEFT, id(connected).state ? "󰖩" : "󰖪");
+          
+          // Hourglass
+          it.print(122, 2, id(icon_font_10), TextAlign::TOP_RIGHT, id(timer_on).state ? "󰔟" : "");
+          
+          // Sleeping
+          it.print(122, 2, id(icon_font_10), TextAlign::TOP_RIGHT, id(sleep_timer_on).state ? "󰒲" : "");
+          
+          // Clock
+          it.strftime(122, 64, id(roboto_b_s), TextAlign::BOTTOM_RIGHT, "%H:%M", id(esptime).now());
+          // it.printf(0, 64, id(roboto_b_s), TextAlign::TOP_CENTER, "%H:%M", id(seneste).c_str());
+          //it.strftime(0, 64, id(roboto_b_s), TextAlign::BOTTOM_LEFT, "%H:%M", id(seneste).c_str());
+          
+          // Weight
+          it.printf(0, 64, id(roboto_b_s), TextAlign::BOTTOM_LEFT, "%.1f g", id(smart_scale_hx711_value).state);
+          
+          // Volume
+          it.printf(64, 0, id(roboto_b), TextAlign::TOP_CENTER, "%.1f mL", id(mme_ml).state);
+          
+          // Latest amount
+          if (id(mme_amount_ha).has_state() && id(seneste).has_state()) {
+            it.printf(64, 28, id(roboto_b_s), TextAlign::TOP_CENTER, "%.0f mL, kl. %s", id(mme_amount_ha).state, id(seneste).state.c_str());
+          };
+          
+      - id: full
+        lambda: |-
+          
+          // Print bottle icon
+          it.print(64, 5, id(icon_font_20), TextAlign::TOP_CENTER, "󰼹");
+          
+          // Print text
+          it.print(64, 25, id(roboto_b), TextAlign::TOP_CENTER, "Spisetid");
+          
+          // Print more info
+          it.printf(0, 64, id(roboto_b_s), TextAlign::BOTTOM_LEFT, "Timer startet: %.0f mL registreret", id(latest_full).state);
+          
+      - id: empty
+        lambda: |-
+          
+          // Print bottle icon
+          it.print(64, 5, id(icon_font_20), TextAlign::TOP_CENTER, "󰼹");
+          
+          // Print text
+          it.printf(64, 25, id(roboto_b), TextAlign::TOP_CENTER, "%.0f mL spist", id(latest_amount).state);
+          
+          // Print more info
+          it.printf(0, 64, id(roboto_b_s), TextAlign::BOTTOM_LEFT, "Data gemt: %.0f mL registreret", id(latest_empty).state);
+          
+      - id: sleep_timer
+        lambda: |-
+          
+          // Print sleep icon
+          it.print(64, 5, id(icon_font_20), TextAlign::TOP_CENTER, "󰒲");
+          
+          // Print text
+          it.print(64, 25, id(roboto_b), TextAlign::TOP_CENTER, "Stopper sleep-timer");
+          
+          // Print more info
+          it.printf(0, 64, id(roboto_b_s), TextAlign::BOTTOM_LEFT, "Søvn data registreret");
+          
+      - id: feed_timer
+        lambda: |-
+          
+          // Print bottle icon
+          it.print(64, 5, id(icon_font_20), TextAlign::TOP_CENTER, "󰼹");
+          
+          // Print text
+          it.print(64, 25, id(roboto_b), TextAlign::TOP_CENTER, "Tryk på den røde!");
+          
+          // Print more info
+          it.printf(0, 64, id(roboto_b_s), TextAlign::BOTTOM_LEFT, "Timer startet: %.0f mL registreret", id(latest_full).state);
