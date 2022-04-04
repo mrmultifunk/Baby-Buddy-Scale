@@ -1,5 +1,5 @@
 # Baby Buddy Scale
-A 3D printed scale to use with Baby Buddy and Home Assistant.
+A 3D printed scale to use with Baby Buddy and Home Assistant. This is a work in progress. I'm mainly sharing it here, for my own learning and for others to get inspiration.
 
 ## Parts needed
 
