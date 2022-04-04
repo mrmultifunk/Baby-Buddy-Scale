@@ -1,30 +1,38 @@
 esphome:
   name: mme-scale
 
-esp8266:
-  board: d1_mini
+esp32:
+  board: esp32doit-devkit-v1
+  framework:
+    type: arduino
 
 # Enable logging
 logger:
-  level: INFO
 
 # Enable Home Assistant API
 api:
 
 ota:
-  password: "your password"
+  password: "5a581cff9cc7cd3f6200b40a752705f1"
 
 wifi:
-  ssid: "your ssid"
-  password: "your password"
+  ssid: "xxxx"
+  password: "xxxx"
   power_save_mode: none
 
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
     ssid: "Mme-Scale Fallback Hotspot"
-    password: "yor password"
+    password: "xxxx"
 
 captive_portal:
+
+#web_server:
+  #version: 2
+
+################################################################################
+#                               Configuration                                  #
+################################################################################
 
 ################################################################################
 #                                   Notes                                      #
@@ -40,7 +48,7 @@ globals:
     type: float
     restore_value: yes
     # NOTE: make sure to align this value to the one used in "calibrate_linear" below!
-    initial_value: '160078'
+    initial_value: '71736'
     
   - id: auto_tare_enabled
     type: bool
@@ -98,16 +106,14 @@ switch:
     turn_off_action:
       - lambda: |-
           id(manual_tare_flag) = false;
-          
-  ## Switch used to turn on/off display
-  - platform: template
-    id: lcd_on_off
-    name: "MME display"
-    icon: mdi:television
-    turn_on_action:
-      - lambda: id(lcd).turn_on();
-    turn_off_action:
-      - lambda: id(lcd).turn_off();
+    
+output:
+  ## Onboard LED
+  - platform: gpio
+    id: onboard_led
+    pin:
+      number: GPIO2
+      mode: OUTPUT
 
 sensor:
   ## Intitial zero
@@ -133,8 +139,8 @@ sensor:
   - platform: hx711
     id: smart_scale_hx711_value_raw
     internal: True
-    dout_pin: D6
-    clk_pin: D7
+    dout_pin: 26
+    clk_pin: 27
     gain: 128
     unit_of_measurement: g
     accuracy_decimals: 3
@@ -182,8 +188,8 @@ sensor:
           # retrieve these values by evaluating the raw values with loads of known mass.
           # note that a bigger difference between measurements usually results in higher resolution,
           # so measure 0 Kg and the highest known mass you have (like f.ex. your own weight, measured by a normal scale with good accuracy)
-          - 160078 -> 0.0
-          - -1219311 -> 351.0
+          - 71736 -> 0.0
+          - -656921 -> 185.6
           #- 141829 -> 28.7
       # map values below 0.1 to 0 (to decrease value changes due to random fluctuation)
       - lambda: |-
@@ -210,9 +216,9 @@ sensor:
     internal: False
     icon: mdi:baby-bottle
     filters:
-      # apply auto_tare difference
+      # apply tare difference
       - lambda: |-
-          if (x <= 76.0) {
+          if (x <= 75.0) {
             return 0.0;
           } else {
             return (x - 73.4)/0.995;
@@ -220,6 +226,16 @@ sensor:
     unit_of_measurement: mL
     accuracy_decimals: 1
     update_interval: 0.5s
+    
+  ## Calculated needed amount (DK figures)  
+  - platform: template
+    id: mme_needed_ml
+    name: "MME behov"
+    internal: False
+    icon: mdi:baby-bottle
+    unit_of_measurement: mL
+    accuracy_decimals: 0
+    #update_interval: 0.5s
     
   ## Latest full bottle registred
   - platform: template
@@ -248,12 +264,23 @@ sensor:
     entity_id: sensor.marie_engedal_last_feeding
     id: mme_amount_ha
     internal: true
+    
+  ## HA sensor - Marie latest weight from Baby Buddy integration
+  - platform: homeassistant
+    internal: true
+    entity_id: sensor.marie_engedal_last_weight
+    id: marie_latest_weight
+    on_value:
+      then:
+        - sensor.template.publish:
+            id: mme_needed_ml
+            state: !lambda 'return id(marie_latest_weight).state * 0.16666667;'
   
   ## Wifi signal sensor
   - platform: wifi_signal
     name: "WiFi Signal"
     id: wifisignal
-    update_interval: 15s
+    update_interval: 60s
 
 text_sensor:
   ## HA sensor - latest feeding time in "HH:MM"
@@ -275,7 +302,7 @@ binary_sensor:
     id: green
     icon: mdi:circle
     pin:
-      number: D5
+      number: 23
       inverted: true
       mode: INPUT_PULLUP
     on_press:
@@ -307,6 +334,25 @@ binary_sensor:
               - display.page.show: home
             else:
               - logger.log: "Full bottle press registred on empty scale"
+              - output.turn_on: onboard_led
+              - delay: 200ms
+              - output.turn_off: onboard_led
+              - delay: 200ms
+              - output.turn_on: onboard_led
+              - delay: 200ms
+              - output.turn_off: onboard_led
+              - delay: 200ms
+              - output.turn_on: onboard_led
+              - delay: 200ms
+              - output.turn_off: onboard_led
+              - delay: 200ms
+              - output.turn_on: onboard_led
+              - delay: 200ms
+              - output.turn_off: onboard_led
+              - delay: 200ms
+              - output.turn_on: onboard_led
+              - delay: 200ms
+              - output.turn_off: onboard_led
 
   ## Red button - Empty bottle
   - platform: gpio
@@ -314,7 +360,7 @@ binary_sensor:
     id: red
     icon: mdi:circle-outline
     pin:
-      number: RX
+      number: 22
       inverted: true
       mode: INPUT_PULLUP
     on_press:
@@ -334,8 +380,6 @@ binary_sensor:
               - display.page.show: empty
               - delay: 5s
               - display.page.show: home
-              - delay: 120s
-              - lambda: id(lcd).turn_off();
   
   ## WiFi connected
   - platform: status
@@ -350,7 +394,7 @@ binary_sensor:
     
   ## HA binary - Sleeping timer active - from template
   - platform: homeassistant
-    entity_id: binary_sensor.baby_buddy_marie_sleeptimer
+    entity_id: binary_sensor.baby_buddy_marie_sovetimer
     internal: true
     id: sleep_timer_on
 
@@ -358,8 +402,8 @@ binary_sensor:
 #                                 Display                                      #
 ################################################################################
 i2c:
-  sda: D2
-  scl: D1
+  sda: 19
+  scl: 18
   scan: true
   
 font:
@@ -373,7 +417,7 @@ font:
     
   - file: 'Roboto-Bold.ttf'
     id: roboto_b_ss
-    size: 12
+    size: 10
     
   - file: 'Roboto-Bold.ttf'
     id: roboto_b
@@ -393,9 +437,9 @@ font:
     glyphs: [
       "󰖩", # wifi-on
       "󰖪", # wifi-off
-      "󰔟", # hourglass
-      "󰼹", # baby bottle
-      "󰒲" # sleep
+      "󰔟", # timeglas
+      "󰼹", # sutteflaske
+      "󰒲" # sove
       ]
       
   - file: 'materialdesignicons-webfont.ttf'
@@ -404,9 +448,9 @@ font:
     glyphs: [
       "󰖩", # wifi-on
       "󰖪", # wifi-off
-      "󰔟", # hourglass
-      "󰼹", # baby bottle
-      "󰒲" # sleep
+      "󰔟", # timeglas
+      "󰼹", # sutteflaske
+      "󰒲" # sove
       ]
 
 display:
@@ -445,6 +489,11 @@ display:
             it.printf(64, 28, id(roboto_b_s), TextAlign::TOP_CENTER, "%.0f mL, kl. %s", id(mme_amount_ha).state, id(seneste).state.c_str());
           };
           
+          // Show latest full registred bottle
+          if (id(latest_full).state > 0.0) {
+            it.printf(64, 64, id(roboto_b_ss), TextAlign::BOTTOM_CENTER, "%.0f mL", id(latest_full).state);
+          };
+          
       - id: full
         lambda: |-
           
@@ -476,7 +525,7 @@ display:
           it.print(64, 5, id(icon_font_20), TextAlign::TOP_CENTER, "󰒲");
           
           // Print text
-          it.print(64, 25, id(roboto_b), TextAlign::TOP_CENTER, "Stopper sleep-timer");
+          it.print(64, 25, id(roboto_b), TextAlign::TOP_CENTER, "Stopper sove-timer");
           
           // Print more info
           it.printf(0, 64, id(roboto_b_s), TextAlign::BOTTOM_LEFT, "Søvn data registreret");
@@ -492,3 +541,4 @@ display:
           
           // Print more info
           it.printf(0, 64, id(roboto_b_s), TextAlign::BOTTOM_LEFT, "Timer startet: %.0f mL registreret", id(latest_full).state);
+    
